@@ -250,13 +250,7 @@ with st.sidebar:
         f"📦 アーカイブ ({len(archived_conversations)})",
         expanded=st.session_state.archive_expanded
     ):
-        col_archive_head_1, col_archive_head_2 = st.columns([3, 1])
-        with col_archive_head_1:
-            st.caption("履歴会話をまとめて管理できます。")
-        with col_archive_head_2:
-            if st.button("閉じる", key="archive_close_button", use_container_width=True):
-                st.session_state.archive_expanded = False
-                st.rerun()
+        st.caption("履歴会話をまとめて管理できます。")
 
         if not archived_conversations:
             st.caption("アーカイブはありません。")
