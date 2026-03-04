@@ -211,8 +211,13 @@ if st.session_state.clear_manual_input:
 # APIキー確認
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY", "")
+    except Exception:
+        api_key = ""
+if not api_key:
     st.error("❌ .envファイルにOPENAI_API_KEYが設定されていません。")
-    st.info("📝 .env.exampleを参考に.envファイルを作成し、APIキーを設定してください。")
+    st.info("📝 .env または Streamlit Secrets に OPENAI_API_KEY を設定してください。")
     st.stop()
 
 # LLMクライアント初期化
