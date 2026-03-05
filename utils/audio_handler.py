@@ -1,5 +1,4 @@
 from openai import OpenAI
-from typing import Optional
 import io
 
 
@@ -47,7 +46,7 @@ class AudioHandler:
             return transcript.text
 
         except Exception as e:
-            raise Exception(f"音声認識エラー: {str(e)}")
+            raise RuntimeError(f"音声認識エラー: {str(e)}") from e
 
     def text_to_speech(self, text: str, voice: str = "alloy") -> bytes:
         """
@@ -68,11 +67,7 @@ class AudioHandler:
             )
 
             # ストリームから音声データを取得
-            audio_data = b""
-            for chunk in response.iter_bytes():
-                audio_data += chunk
-
-            return audio_data
+            return b"".join(response.iter_bytes())
 
         except Exception as e:
-            raise Exception(f"音声合成エラー: {str(e)}")
+            raise RuntimeError(f"音声合成エラー: {str(e)}") from e

@@ -1,6 +1,6 @@
 from PyPDF2 import PdfReader
-from typing import Optional
 import io
+import os
 
 
 class FileHandler:
@@ -27,8 +27,8 @@ class FileHandler:
             try:
                 content = uploaded_file.read().decode('shift-jis')
                 return content
-            except:
-                raise Exception("ファイルの読み込みに失敗しました。エンコーディングを確認してください。")
+            except UnicodeDecodeError as e:
+                raise ValueError("ファイルの読み込みに失敗しました。エンコーディングを確認してください。") from e
 
     @staticmethod
     def read_pdf_file(uploaded_file) -> str:
@@ -52,7 +52,7 @@ class FileHandler:
 
             return text.strip()
         except Exception as e:
-            raise Exception(f"PDFの読み込みに失敗しました: {str(e)}")
+            raise RuntimeError(f"PDFの読み込みに失敗しました: {str(e)}") from e
 
     @staticmethod
     def process_uploaded_file(uploaded_file) -> str:
@@ -66,14 +66,15 @@ class FileHandler:
             ファイル内容のテキスト
 
         Raises:
-            Exception: サポートされていないファイル形式
+            ValueError: サポートされていないファイル形式
         """
         file_name = uploaded_file.name
-        file_extension = file_name.split('.')[-1].lower()
+        _, ext = os.path.splitext(file_name)
+        file_extension = ext.lower().lstrip(".")
 
         if file_extension in ['txt', 'md']:
             return FileHandler.read_text_file(uploaded_file)
         elif file_extension == 'pdf':
             return FileHandler.read_pdf_file(uploaded_file)
         else:
-            raise Exception(f"サポートされていないファイル形式です: .{file_extension}")
+            raise ValueError(f"サポートされていないファイル形式です: .{file_extension}")

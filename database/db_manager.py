@@ -1,6 +1,5 @@
 import sqlite3
 from typing import List, Dict, Optional
-from datetime import datetime
 import os
 import re
 
@@ -8,11 +7,30 @@ from database.seed_demo_policies import initialize_schema as initialize_policy_s
 from database.seed_demo_policies import upsert_policies as upsert_demo_policies
 
 try:
-    import psycopg2
+    import psycopg2 # pyright: ignore[reportMissingModuleSource]
     from psycopg2.extras import RealDictCursor
 except Exception:  # pragma: no cover - optional dependency for PostgreSQL deploys
     psycopg2 = None
     RealDictCursor = None
+
+
+CONVERSATION_BASE_SELECT = """
+    SELECT id, title, created_at, updated_at, is_pinned, is_archived, archived_at
+    FROM conversations
+"""
+
+SEARCH_TEXT_REPLACEMENTS = (
+    ("社内文書", "社内規程"),
+    ("社内規定", "社内規程"),
+    ("規定", "規程"),
+    ("ルール", "規程"),
+)
+
+JA_CHAR_PATTERN = re.compile(r"[一-龥ぁ-んァ-ンー]")
+ALNUM_TOKEN_PATTERN = re.compile(r"[a-z0-9]{2,}")
+JA_TOKEN_PATTERN = re.compile(r"[一-龥ぁ-んァ-ンー]{2,}")
+JA_SCRIPT_TOKEN_PATTERN = re.compile(r"[一-龥]{2,}|[ぁ-ん]{2,}|[ァ-ンー]{2,}")
+JA_SEGMENT_DELIMITER_PATTERN = re.compile(r"[のはをにでとがへやも、。！？\s]+")
 
 
 class DatabaseManager:
@@ -30,7 +48,9 @@ class DatabaseManager:
         self.db_path = db_path
         if not self.is_postgres:
             # データディレクトリが存在しない場合は作成
-            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            db_dir = os.path.dirname(db_path)
+            if db_dir:
+                os.makedirs(db_dir, exist_ok=True)
         self.initialize_database()
 
     def _to_placeholder_sql(self, query: str) -> str:
@@ -63,6 +83,19 @@ class DatabaseManager:
     def _executemany(self, cursor, query: str, params_seq):
         query = self._to_placeholder_sql(query)
         return cursor.executemany(query, params_seq)
+
+    @staticmethod
+    def _row_get(row, key: str, fallback_index: int = 0):
+        if row is None:
+            return None
+        try:
+            return row[key]
+        except Exception:
+            return row[fallback_index]
+
+    @staticmethod
+    def _rows_to_dicts(rows) -> List[Dict]:
+        return [dict(row) for row in rows]
 
     def initialize_database(self) -> None:
         """テーブル作成"""
@@ -232,16 +265,12 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        self._execute(cursor, """
-            SELECT id, title, created_at, updated_at, is_pinned, is_archived, archived_at
-            FROM conversations
-            ORDER BY is_pinned DESC, updated_at DESC
-        """)
+        self._execute(cursor, CONVERSATION_BASE_SELECT + " ORDER BY is_pinned DESC, updated_at DESC")
 
         rows = cursor.fetchall()
         conn.close()
 
-        return [dict(row) for row in rows]
+        return self._rows_to_dicts(rows)
 
     def get_conversation(self, conversation_id: int) -> Optional[Dict]:
         """
@@ -256,11 +285,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        self._execute(cursor, """
-            SELECT id, title, created_at, updated_at, is_pinned, is_archived, archived_at
-            FROM conversations
-            WHERE id = ?
-        """, (conversation_id,))
+        self._execute(cursor, CONVERSATION_BASE_SELECT + " WHERE id = ?", (conversation_id,))
 
         row = cursor.fetchone()
         conn.close()
@@ -418,7 +443,7 @@ class DatabaseManager:
 
         rows = cursor.fetchall()
         conn.close()
-        return [dict(row) for row in rows]
+        return self._rows_to_dicts(rows)
 
     def get_recent_conversations(self, limit: int = 10) -> List[Dict]:
         """
@@ -441,7 +466,7 @@ class DatabaseManager:
 
         rows = cursor.fetchall()
         conn.close()
-        return [dict(row) for row in rows]
+        return self._rows_to_dicts(rows)
 
     def get_archived_conversations(self, limit: int = 30) -> List[Dict]:
         """
@@ -463,7 +488,7 @@ class DatabaseManager:
 
         rows = cursor.fetchall()
         conn.close()
-        return [dict(row) for row in rows]
+        return self._rows_to_dicts(rows)
 
     def get_latest_active_conversation_id(self) -> Optional[int]:
         """
@@ -481,7 +506,8 @@ class DatabaseManager:
         """)
         row = cursor.fetchone()
         conn.close()
-        return int(row["id"]) if row else None
+        latest_id = self._row_get(row, "id")
+        return int(latest_id) if latest_id is not None else None
 
     def set_conversation_pin(self, conversation_id: int, pinned: bool) -> None:
         """
@@ -639,7 +665,7 @@ class DatabaseManager:
         rows = cursor.fetchall()
         conn.close()
 
-        return [dict(row) for row in rows]
+        return self._rows_to_dicts(rows)
 
     def clear_messages(self, conversation_id: int) -> None:
         """
@@ -764,13 +790,7 @@ class DatabaseManager:
         検索用テキスト正規化（同義語吸収）
         """
         normalized = (text or "").lower()
-        replacements = {
-            "社内文書": "社内規程",
-            "社内規定": "社内規程",
-            "規定": "規程",
-            "ルール": "規程",
-        }
-        for src, dst in replacements.items():
+        for src, dst in SEARCH_TEXT_REPLACEMENTS:
             normalized = normalized.replace(src, dst)
 
         normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -796,20 +816,20 @@ class DatabaseManager:
 
         add_token(normalized_query, 5.0, strong=True)
 
-        for token in re.findall(r"[a-z0-9]{2,}", normalized_query):
+        for token in ALNUM_TOKEN_PATTERN.findall(normalized_query):
             add_token(token, 2.5 if len(token) >= 4 else 2.0, strong=True)
 
         # 助詞を区切りにして日本語語句を抽出
-        segmented = re.sub(r"[のはをにでとがへやも、。！？\s]+", " ", normalized_query)
-        for token in re.findall(r"[一-龥ぁ-んァ-ンー]{2,}", segmented):
+        segmented = JA_SEGMENT_DELIMITER_PATTERN.sub(" ", normalized_query)
+        for token in JA_TOKEN_PATTERN.findall(segmented):
             add_token(token, 3.0 if len(token) >= 3 else 2.0, strong=True)
 
         # スクリプト境界で追加分割（例: パスワード要件 -> パスワード / 要件）
-        for token in re.findall(r"[一-龥]{2,}|[ぁ-ん]{2,}|[ァ-ンー]{2,}", normalized_query):
+        for token in JA_SCRIPT_TOKEN_PATTERN.findall(normalized_query):
             add_token(token, 2.5 if len(token) >= 3 else 2.0, strong=True)
 
         # 取りこぼし防止のため2文字バイグラムも追加（弱い重み）
-        ja_text = "".join(re.findall(r"[一-龥ぁ-んァ-ンー]", normalized_query))
+        ja_text = "".join(JA_CHAR_PATTERN.findall(normalized_query))
         if len(ja_text) >= 2:
             for i in range(len(ja_text) - 1):
                 add_token(ja_text[i:i + 2], 0.35, strong=False)
@@ -884,7 +904,7 @@ class DatabaseManager:
         rows = cursor.fetchall()
         conn.close()
 
-        return [dict(row) for row in rows]
+        return self._rows_to_dicts(rows)
 
     def get_preset(self, name: str) -> Optional[Dict]:
         """

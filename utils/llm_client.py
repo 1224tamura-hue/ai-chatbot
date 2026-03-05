@@ -51,7 +51,7 @@ class LLMClient:
                 return response.choices[0].message.content
 
         except Exception as e:
-            raise Exception(f"API呼び出しエラー: {str(e)}")
+            raise RuntimeError(f"API呼び出しエラー: {str(e)}") from e
 
     def count_tokens(self, text: str, model: str = "gpt-3.5-turbo") -> int:
         """
