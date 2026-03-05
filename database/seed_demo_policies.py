@@ -114,34 +114,65 @@ POLICIES: list[dict[str, Any]] = [
 
 
 def initialize_schema(conn: sqlite3.Connection) -> None:
+    module_name = conn.__class__.__module__
+    is_postgres = module_name.startswith("psycopg2")
     cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS company_policies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            policy_code TEXT NOT NULL UNIQUE,
-            title TEXT NOT NULL,
-            category TEXT NOT NULL,
-            scope TEXT NOT NULL,
-            description TEXT NOT NULL,
-            effective_date TEXT NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    if is_postgres:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_policies (
+                id BIGSERIAL PRIMARY KEY,
+                policy_code TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                category TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                description TEXT NOT NULL,
+                effective_date TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-        """
-    )
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS company_policy_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            policy_id INTEGER NOT NULL,
-            section_no TEXT NOT NULL,
-            item_title TEXT NOT NULL,
-            item_text TEXT NOT NULL,
-            FOREIGN KEY (policy_id) REFERENCES company_policies(id) ON DELETE CASCADE,
-            UNIQUE(policy_id, section_no)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_policy_items (
+                id BIGSERIAL PRIMARY KEY,
+                policy_id BIGINT NOT NULL,
+                section_no TEXT NOT NULL,
+                item_title TEXT NOT NULL,
+                item_text TEXT NOT NULL,
+                FOREIGN KEY (policy_id) REFERENCES company_policies(id) ON DELETE CASCADE,
+                UNIQUE(policy_id, section_no)
+            )
+            """
         )
-        """
-    )
+    else:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_policies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                policy_code TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL,
+                category TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                description TEXT NOT NULL,
+                effective_date TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_policy_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                policy_id INTEGER NOT NULL,
+                section_no TEXT NOT NULL,
+                item_title TEXT NOT NULL,
+                item_text TEXT NOT NULL,
+                FOREIGN KEY (policy_id) REFERENCES company_policies(id) ON DELETE CASCADE,
+                UNIQUE(policy_id, section_no)
+            )
+            """
+        )
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_company_policies_category
@@ -158,6 +189,9 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
 
 
 def upsert_policies(conn: sqlite3.Connection) -> tuple[int, int]:
+    module_name = conn.__class__.__module__
+    is_postgres = module_name.startswith("psycopg2")
+    mark = "%s" if is_postgres else "?"
     cur = conn.cursor()
     policy_count = 0
     item_count = 0
@@ -167,7 +201,7 @@ def upsert_policies(conn: sqlite3.Connection) -> tuple[int, int]:
             """
             INSERT INTO company_policies
                 (policy_code, title, category, scope, description, effective_date, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES ({m}, {m}, {m}, {m}, {m}, {m}, CURRENT_TIMESTAMP)
             ON CONFLICT(policy_code) DO UPDATE SET
                 title = excluded.title,
                 category = excluded.category,
@@ -175,7 +209,7 @@ def upsert_policies(conn: sqlite3.Connection) -> tuple[int, int]:
                 description = excluded.description,
                 effective_date = excluded.effective_date,
                 updated_at = CURRENT_TIMESTAMP
-            """,
+            """.format(m=mark),
             (
                 policy["policy_code"],
                 policy["title"],
@@ -187,20 +221,21 @@ def upsert_policies(conn: sqlite3.Connection) -> tuple[int, int]:
         )
 
         cur.execute(
-            "SELECT id FROM company_policies WHERE policy_code = ?",
+            f"SELECT id FROM company_policies WHERE policy_code = {mark}",
             (policy["policy_code"],),
         )
-        policy_id = cur.fetchone()[0]
+        fetched = cur.fetchone()
+        policy_id = fetched["id"] if isinstance(fetched, dict) else fetched[0]
         policy_count += 1
 
-        cur.execute("DELETE FROM company_policy_items WHERE policy_id = ?", (policy_id,))
+        cur.execute(f"DELETE FROM company_policy_items WHERE policy_id = {mark}", (policy_id,))
         for section_no, item_title, item_text in policy["items"]:
             cur.execute(
                 """
                 INSERT INTO company_policy_items
                     (policy_id, section_no, item_title, item_text)
-                VALUES (?, ?, ?, ?)
-                """,
+                VALUES ({m}, {m}, {m}, {m})
+                """.format(m=mark),
                 (policy_id, section_no, item_title, item_text),
             )
             item_count += 1

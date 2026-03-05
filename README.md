@@ -59,6 +59,12 @@ cp .env.example .env
 OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxxxxxxx
 ```
 
+PostgreSQLを利用する場合は `DATABASE_URL` も設定：
+
+```bash
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require
+```
+
 ### 5. アプリケーションの起動
 
 ```bash
@@ -163,6 +169,11 @@ ai-chatbot-app/
 
 - `.env`ファイルのAPIキーが正しいか確認
 - OpenAI APIの利用制限・残高を確認
+
+### 社内規程RAGが本番でヒットしない
+
+- Streamlit Cloud の `Secrets` に `DATABASE_URL` を設定（Supabase等の外部PostgreSQL）
+- アプリ再起動後、`company_policies` が自動投入されることを確認
 
 ### 音声機能が動作しない
 

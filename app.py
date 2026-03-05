@@ -157,7 +157,14 @@ st.set_page_config(page_title="AI Chatbot", page_icon="🤖", layout="wide")
 
 # セッション状態初期化
 if "db" not in st.session_state:
-    st.session_state.db = DatabaseManager()
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        try:
+            database_url = st.secrets.get("DATABASE_URL", "").strip()
+        except Exception:
+            database_url = ""
+
+    st.session_state.db = DatabaseManager(database_url=database_url)
     st.session_state.db.auto_archive_stale_conversations(days=AUTO_ARCHIVE_DAYS)
     st.session_state.db.cleanup_empty_conversations(title=DEFAULT_CONVERSATION_TITLE, keep=1)
 

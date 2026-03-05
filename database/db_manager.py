@@ -7,74 +7,140 @@ import re
 from database.seed_demo_policies import initialize_schema as initialize_policy_schema
 from database.seed_demo_policies import upsert_policies as upsert_demo_policies
 
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except Exception:  # pragma: no cover - optional dependency for PostgreSQL deploys
+    psycopg2 = None
+    RealDictCursor = None
+
 
 class DatabaseManager:
     """データベース操作を管理するクラス"""
 
-    def __init__(self, db_path: str = "data/chatbot.db"):
+    def __init__(self, db_path: str = "data/chatbot.db", database_url: Optional[str] = None):
         """
         DB接続初期化
 
         Args:
             db_path: データベースファイルのパス
         """
+        self.database_url = (database_url or os.getenv("DATABASE_URL", "")).strip()
+        self.is_postgres = self.database_url.startswith(("postgres://", "postgresql://"))
         self.db_path = db_path
-        # データディレクトリが存在しない場合は作成
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        if not self.is_postgres:
+            # データディレクトリが存在しない場合は作成
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.initialize_database()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    def _to_placeholder_sql(self, query: str) -> str:
+        if self.is_postgres:
+            return query.replace("?", "%s")
+        return query
+
+    def _get_connection(self):
         """DB接続取得"""
+        if self.is_postgres:
+            if psycopg2 is None:
+                raise RuntimeError(
+                    "PostgreSQL利用には psycopg2-binary が必要です。requirements.txt を更新後に再デプロイしてください。"
+                )
+            conn = psycopg2.connect(self.database_url, cursor_factory=RealDictCursor)
+            conn.autocommit = False
+            return conn
+
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row  # 辞書形式で結果を取得
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    def _execute(self, cursor, query: str, params=None):
+        query = self._to_placeholder_sql(query)
+        if params is None:
+            return cursor.execute(query)
+        return cursor.execute(query, params)
+
+    def _executemany(self, cursor, query: str, params_seq):
+        query = self._to_placeholder_sql(query)
+        return cursor.executemany(query, params_seq)
 
     def initialize_database(self) -> None:
         """テーブル作成"""
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        # conversationsテーブル
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        if self.is_postgres:
+            self._execute(cursor, """
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id BIGSERIAL PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            self._execute(cursor, """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    conversation_id BIGINT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                )
+            """)
+            self._execute(cursor, """
+                CREATE TABLE IF NOT EXISTS presets (
+                    id BIGSERIAL PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    system_prompt TEXT,
+                    temperature REAL DEFAULT 0.7,
+                    max_tokens INTEGER DEFAULT 1000,
+                    model TEXT DEFAULT 'gpt-3.5-turbo',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        else:
+            # conversationsテーブル
+            self._execute(cursor, """
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
-        # messagesテーブル
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER NOT NULL,
-                role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
-                content TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-            )
-        """)
+            # messagesテーブル
+            self._execute(cursor, """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id INTEGER NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                )
+            """)
 
-        # presetsテーブル
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS presets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                system_prompt TEXT,
-                temperature REAL DEFAULT 0.7,
-                max_tokens INTEGER DEFAULT 1000,
-                model TEXT DEFAULT 'gpt-3.5-turbo',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+            # presetsテーブル
+            self._execute(cursor, """
+                CREATE TABLE IF NOT EXISTS presets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    system_prompt TEXT,
+                    temperature REAL DEFAULT 0.7,
+                    max_tokens INTEGER DEFAULT 1000,
+                    model TEXT DEFAULT 'gpt-3.5-turbo',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
 
         # インデックス作成
-        cursor.execute("""
+        self._execute(cursor, """
             CREATE INDEX IF NOT EXISTS idx_messages_conversation_id
             ON messages(conversation_id)
         """)
-        cursor.execute("""
+        self._execute(cursor, """
             CREATE INDEX IF NOT EXISTS idx_conversations_updated_at
             ON conversations(updated_at DESC)
         """)
@@ -86,32 +152,41 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
-    def _ensure_company_policies(self, conn: sqlite3.Connection) -> None:
+    def _ensure_company_policies(self, conn) -> None:
         """
         社内規程テーブルを保証し、空の場合はデモデータを投入する
         """
         initialize_policy_schema(conn)
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) AS cnt FROM company_policies")
+        self._execute(cursor, "SELECT COUNT(*) AS cnt FROM company_policies")
         row = cursor.fetchone()
         policy_count = int(row["cnt"]) if row else 0
 
         if policy_count == 0:
             upsert_demo_policies(conn)
 
-    def _ensure_conversation_columns(self, cursor: sqlite3.Cursor) -> None:
+    def _ensure_conversation_columns(self, cursor) -> None:
         """
         conversationsテーブルに必要カラムを追加（マイグレーション）
         """
-        cursor.execute("PRAGMA table_info(conversations)")
-        existing_columns = {row[1] for row in cursor.fetchall()}
+        if self.is_postgres:
+            self._execute(cursor, """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'conversations'
+            """)
+            existing_columns = {row["column_name"] for row in cursor.fetchall()}
+        else:
+            self._execute(cursor, "PRAGMA table_info(conversations)")
+            existing_columns = {row[1] for row in cursor.fetchall()}
 
         if "is_pinned" not in existing_columns:
-            cursor.execute("ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
+            self._execute(cursor, "ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0")
         if "is_archived" not in existing_columns:
-            cursor.execute("ALTER TABLE conversations ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0")
+            self._execute(cursor, "ALTER TABLE conversations ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0")
         if "archived_at" not in existing_columns:
-            cursor.execute("ALTER TABLE conversations ADD COLUMN archived_at TIMESTAMP")
+            self._execute(cursor, "ALTER TABLE conversations ADD COLUMN archived_at TIMESTAMP")
 
     # ===== 会話管理 =====
 
@@ -128,12 +203,20 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute(
-            "INSERT INTO conversations (title) VALUES (?)",
-            (title,)
-        )
-
-        conversation_id = cursor.lastrowid
+        if self.is_postgres:
+            self._execute(
+                cursor,
+                "INSERT INTO conversations (title) VALUES (?) RETURNING id",
+                (title,),
+            )
+            conversation_id = int(cursor.fetchone()["id"])
+        else:
+            self._execute(
+                cursor,
+                "INSERT INTO conversations (title) VALUES (?)",
+                (title,),
+            )
+            conversation_id = cursor.lastrowid
         conn.commit()
         conn.close()
 
@@ -149,7 +232,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             SELECT id, title, created_at, updated_at, is_pinned, is_archived, archived_at
             FROM conversations
             ORDER BY is_pinned DESC, updated_at DESC
@@ -173,7 +256,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             SELECT id, title, created_at, updated_at, is_pinned, is_archived, archived_at
             FROM conversations
             WHERE id = ?
@@ -195,7 +278,8 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute(
+        self._execute(
+            cursor,
             "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (title, conversation_id)
         )
@@ -213,7 +297,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        self._execute(cursor, "DELETE FROM conversations WHERE id = ?", (conversation_id,))
 
         conn.commit()
         conn.close()
@@ -232,7 +316,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             SELECT c.id, c.updated_at
             FROM conversations c
             LEFT JOIN messages m ON m.conversation_id = c.id
@@ -247,7 +331,7 @@ class DatabaseManager:
         to_delete = ids[keep:]
 
         if to_delete:
-            cursor.executemany("DELETE FROM conversations WHERE id = ?", [(cid,) for cid in to_delete])
+            self._executemany(cursor, "DELETE FROM conversations WHERE id = ?", [(cid,) for cid in to_delete])
 
         conn.commit()
         conn.close()
@@ -262,7 +346,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             UPDATE conversations
             SET updated_at = CURRENT_TIMESTAMP,
                 is_archived = 0,
@@ -280,20 +364,34 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        params = [f"-{days} days"]
-        sql = """
-            UPDATE conversations
-            SET is_archived = 1,
-                archived_at = CURRENT_TIMESTAMP
-            WHERE is_archived = 0
-              AND is_pinned = 0
-              AND updated_at < datetime('now', ?)
-        """
-        if exclude_conversation_id is not None:
-            sql += " AND id != ?"
-            params.append(exclude_conversation_id)
-
-        cursor.execute(sql, params)
+        if self.is_postgres:
+            params = [days]
+            sql = """
+                UPDATE conversations
+                SET is_archived = 1,
+                    archived_at = CURRENT_TIMESTAMP
+                WHERE is_archived = 0
+                  AND is_pinned = 0
+                  AND updated_at < (CURRENT_TIMESTAMP - (? * INTERVAL '1 day'))
+            """
+            if exclude_conversation_id is not None:
+                sql += " AND id != ?"
+                params.append(exclude_conversation_id)
+            self._execute(cursor, sql, tuple(params))
+        else:
+            params = [f"-{days} days"]
+            sql = """
+                UPDATE conversations
+                SET is_archived = 1,
+                    archived_at = CURRENT_TIMESTAMP
+                WHERE is_archived = 0
+                  AND is_pinned = 0
+                  AND updated_at < datetime('now', ?)
+            """
+            if exclude_conversation_id is not None:
+                sql += " AND id != ?"
+                params.append(exclude_conversation_id)
+            self._execute(cursor, sql, tuple(params))
         affected = cursor.rowcount
 
         conn.commit()
@@ -307,7 +405,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             SELECT c.id, c.title, c.created_at, c.updated_at, c.is_pinned, c.is_archived,
                    COUNT(m.id) AS message_count
             FROM conversations c
@@ -329,7 +427,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             SELECT c.id, c.title, c.created_at, c.updated_at, c.is_pinned, c.is_archived,
                    COUNT(m.id) AS message_count
             FROM conversations c
@@ -352,7 +450,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             SELECT c.id, c.title, c.created_at, c.updated_at, c.archived_at,
                    COUNT(m.id) AS message_count
             FROM conversations c
@@ -374,7 +472,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             SELECT id
             FROM conversations
             WHERE is_archived = 0
@@ -392,7 +490,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             UPDATE conversations
             SET is_pinned = ?,
                 updated_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE updated_at END
@@ -409,7 +507,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             UPDATE conversations
             SET is_archived = 0,
                 archived_at = NULL,
@@ -427,7 +525,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             UPDATE conversations
             SET is_archived = 1,
                 is_pinned = 0,
@@ -450,7 +548,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,))
+        self._execute(cursor, "SELECT title FROM conversations WHERE id = ?", (conversation_id,))
         row = cursor.fetchone()
         if not row:
             conn.close()
@@ -461,7 +559,7 @@ class DatabaseManager:
             conn.close()
             return
 
-        cursor.execute("""
+        self._execute(cursor, """
             SELECT content
             FROM messages
             WHERE conversation_id = ?
@@ -481,7 +579,7 @@ class DatabaseManager:
             return
 
         new_title = normalized[:max_len]
-        cursor.execute("""
+        self._execute(cursor, """
             UPDATE conversations
             SET title = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
@@ -504,7 +602,8 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute(
+        self._execute(
+            cursor,
             "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
             (conversation_id, role, content)
         )
@@ -530,7 +629,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             SELECT id, conversation_id, role, content, created_at
             FROM messages
             WHERE conversation_id = ?
@@ -552,7 +651,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+        self._execute(cursor, "DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
 
         conn.commit()
         conn.close()
@@ -580,17 +679,25 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
-            SELECT COUNT(*) AS cnt
-            FROM sqlite_master
-            WHERE type = 'table'
-              AND name IN ('company_policies', 'company_policy_items')
-        """)
+        if self.is_postgres:
+            self._execute(cursor, """
+                SELECT COUNT(*) AS cnt
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_name IN ('company_policies', 'company_policy_items')
+            """)
+        else:
+            self._execute(cursor, """
+                SELECT COUNT(*) AS cnt
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name IN ('company_policies', 'company_policy_items')
+            """)
         if cursor.fetchone()["cnt"] < 2:
             conn.close()
             return []
 
-        cursor.execute("""
+        self._execute(cursor, """
             SELECT
                 p.policy_code,
                 p.title,
@@ -739,10 +846,21 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
-            INSERT OR REPLACE INTO presets (name, system_prompt, temperature, max_tokens, model)
-            VALUES (?, ?, ?, ?, ?)
-        """, (name, system_prompt, temperature, max_tokens, model))
+        if self.is_postgres:
+            self._execute(cursor, """
+                INSERT INTO presets (name, system_prompt, temperature, max_tokens, model)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    system_prompt = EXCLUDED.system_prompt,
+                    temperature = EXCLUDED.temperature,
+                    max_tokens = EXCLUDED.max_tokens,
+                    model = EXCLUDED.model
+            """, (name, system_prompt, temperature, max_tokens, model))
+        else:
+            self._execute(cursor, """
+                INSERT OR REPLACE INTO presets (name, system_prompt, temperature, max_tokens, model)
+                VALUES (?, ?, ?, ?, ?)
+            """, (name, system_prompt, temperature, max_tokens, model))
 
         conn.commit()
         conn.close()
@@ -757,7 +875,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
+        self._execute(cursor, """
             SELECT id, name, system_prompt, temperature, max_tokens, model, created_at
             FROM presets
             ORDER BY created_at DESC
@@ -781,7 +899,8 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute(
+        self._execute(
+            cursor,
             "SELECT id, name, system_prompt, temperature, max_tokens, model, created_at FROM presets WHERE name = ?",
             (name,)
         )
@@ -801,7 +920,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        cursor.execute("DELETE FROM presets WHERE name = ?", (name,))
+        self._execute(cursor, "DELETE FROM presets WHERE name = ?", (name,))
 
         conn.commit()
         conn.close()
