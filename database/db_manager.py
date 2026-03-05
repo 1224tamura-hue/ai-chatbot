@@ -4,6 +4,9 @@ from datetime import datetime
 import os
 import re
 
+from database.seed_demo_policies import initialize_schema as initialize_policy_schema
+from database.seed_demo_policies import upsert_policies as upsert_demo_policies
+
 
 class DatabaseManager:
     """データベース操作を管理するクラス"""
@@ -78,9 +81,23 @@ class DatabaseManager:
 
         # 既存DB向けのカラム拡張
         self._ensure_conversation_columns(cursor)
+        self._ensure_company_policies(conn)
 
         conn.commit()
         conn.close()
+
+    def _ensure_company_policies(self, conn: sqlite3.Connection) -> None:
+        """
+        社内規程テーブルを保証し、空の場合はデモデータを投入する
+        """
+        initialize_policy_schema(conn)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS cnt FROM company_policies")
+        row = cursor.fetchone()
+        policy_count = int(row["cnt"]) if row else 0
+
+        if policy_count == 0:
+            upsert_demo_policies(conn)
 
     def _ensure_conversation_columns(self, cursor: sqlite3.Cursor) -> None:
         """
@@ -556,8 +573,8 @@ class DatabaseManager:
         if not query or not query.strip():
             return []
 
-        tokens = self._tokenize_query(query)
-        if not tokens:
+        normalized_query, token_weights, strong_tokens = self._build_query_tokens(query)
+        if not token_weights:
             return []
 
         conn = self._get_connection()
@@ -592,7 +609,8 @@ class DatabaseManager:
 
         scored_results = []
         for row in rows:
-            searchable_text = " ".join(
+            searchable_text = self._normalize_search_text(
+                " ".join(
                 [
                     row["policy_code"],
                     row["title"],
@@ -603,10 +621,24 @@ class DatabaseManager:
                     row["item_title"],
                     row["item_text"],
                 ]
-            ).lower()
+                )
+            )
 
-            score = sum(1 for token in tokens if token in searchable_text)
-            if score > 0:
+            score = 0.0
+            strong_hit = False
+
+            if len(normalized_query) >= 2 and normalized_query in searchable_text:
+                score += 8.0
+                strong_hit = True
+
+            for token, weight in token_weights.items():
+                if token in searchable_text:
+                    score += weight
+                    if token in strong_tokens:
+                        strong_hit = True
+
+            # 2文字バイグラムの偶発一致のみでは採用しない
+            if score > 0 and strong_hit:
                 row_dict = dict(row)
                 row_dict["score"] = score
                 scored_results.append(row_dict)
@@ -620,24 +652,69 @@ class DatabaseManager:
         )
         return scored_results[:limit]
 
-    def _tokenize_query(self, query: str) -> List[str]:
+    def _normalize_search_text(self, text: str) -> str:
         """
-        クエリを簡易トークン分割（日本語・英数字）
+        検索用テキスト正規化（同義語吸収）
         """
-        lowered = query.lower()
-        raw_tokens = re.findall(r"[a-z0-9]{2,}", lowered)
+        normalized = (text or "").lower()
+        replacements = {
+            "社内文書": "社内規程",
+            "社内規定": "社内規程",
+            "規定": "規程",
+            "ルール": "規程",
+        }
+        for src, dst in replacements.items():
+            normalized = normalized.replace(src, dst)
 
-        ja_text = "".join(re.findall(r"[一-龥ぁ-んァ-ンー]", query))
-        if len(ja_text) == 1:
-            raw_tokens.append(ja_text)
-        elif len(ja_text) >= 2:
-            raw_tokens.extend(ja_text[i:i + 2] for i in range(len(ja_text) - 1))
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
 
-        tokens = []
-        for token in raw_tokens:
-            if token not in tokens:
-                tokens.append(token)
-        return tokens[:60]
+    def _build_query_tokens(self, query: str) -> tuple[str, Dict[str, float], set[str]]:
+        """
+        クエリを正規化し、重み付きトークンを生成
+        """
+        normalized_query = self._normalize_search_text(query)
+        token_weights: Dict[str, float] = {}
+        strong_tokens: set[str] = set()
+
+        def add_token(token: str, weight: float, strong: bool = False) -> None:
+            token = token.strip()
+            if len(token) < 2:
+                return
+            current = token_weights.get(token)
+            if current is None or weight > current:
+                token_weights[token] = weight
+            if strong:
+                strong_tokens.add(token)
+
+        add_token(normalized_query, 5.0, strong=True)
+
+        for token in re.findall(r"[a-z0-9]{2,}", normalized_query):
+            add_token(token, 2.5 if len(token) >= 4 else 2.0, strong=True)
+
+        # 助詞を区切りにして日本語語句を抽出
+        segmented = re.sub(r"[のはをにでとがへやも、。！？\s]+", " ", normalized_query)
+        for token in re.findall(r"[一-龥ぁ-んァ-ンー]{2,}", segmented):
+            add_token(token, 3.0 if len(token) >= 3 else 2.0, strong=True)
+
+        # スクリプト境界で追加分割（例: パスワード要件 -> パスワード / 要件）
+        for token in re.findall(r"[一-龥]{2,}|[ぁ-ん]{2,}|[ァ-ンー]{2,}", normalized_query):
+            add_token(token, 2.5 if len(token) >= 3 else 2.0, strong=True)
+
+        # 取りこぼし防止のため2文字バイグラムも追加（弱い重み）
+        ja_text = "".join(re.findall(r"[一-龥ぁ-んァ-ンー]", normalized_query))
+        if len(ja_text) >= 2:
+            for i in range(len(ja_text) - 1):
+                add_token(ja_text[i:i + 2], 0.35, strong=False)
+
+        # 社内文書のような曖昧語を規程検索へ寄せる
+        if any(word in normalized_query for word in ("社内規程", "社内文書", "社内規定", "規程", "規定")):
+            add_token("規程", 4.0, strong=True)
+            add_token("ガイドライン", 2.0, strong=True)
+
+        ordered = dict(sorted(token_weights.items(), key=lambda x: x[1], reverse=True)[:80])
+        strong_tokens = {token for token in strong_tokens if token in ordered}
+        return normalized_query, ordered, strong_tokens
 
     # ===== プリセット管理 =====
 

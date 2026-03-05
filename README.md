@@ -169,6 +169,10 @@ ai-chatbot-app/
 - マイクのアクセス許可を確認
 - ブラウザがマイク使用を許可しているか確認
 
+## ✅ RAG動作確認
+
+- 実画面での確認手順は [docs/rag_manual_checklist.md](docs/rag_manual_checklist.md) を参照
+
 ## 📝 ライセンス
 
 このプロジェクトはMITライセンスの下で公開されています。

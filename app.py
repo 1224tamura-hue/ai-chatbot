@@ -75,11 +75,15 @@ def find_previous_user_text(messages: list[dict], current_index: int) -> str:
     return ""
 
 
-def render_policy_hits(policy_hits: list[dict]) -> None:
-    if not policy_hits:
+def render_policy_hits(policy_hits: list[dict], show_empty: bool = False) -> None:
+    if not policy_hits and not show_empty:
         return
 
-    with st.expander("📚 参照規程", expanded=False):
+    with st.expander(f"📚 参照規程 ({len(policy_hits)}件)", expanded=False):
+        if not policy_hits:
+            st.caption("関連する規程候補は見つかりませんでした。")
+            return
+
         for hit in policy_hits:
             st.markdown(
                 f"- `{hit['policy_code']}` {hit['title']} / 第{hit['section_no']}項 {hit['item_title']}"
@@ -131,7 +135,7 @@ def handle_user_message(user_input: str, llm_client: LLMClient) -> None:
                         response_text += chunk.choices[0].delta.content
                         response_placeholder.markdown(response_text)
 
-                render_policy_hits(policy_hits)
+                render_policy_hits(policy_hits, show_empty=True)
 
         st.session_state.db.add_message(
             st.session_state.current_conversation_id,
