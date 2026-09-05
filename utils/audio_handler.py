@@ -14,7 +14,7 @@ class AudioHandler:
         """
         self.client = OpenAI(api_key=api_key)
 
-    def speech_to_text(self, audio_file) -> str:
+    def speech_to_text(self, audio_file, language: str | None = "ja") -> str:
         """
         音声をテキストに変換（Whisper API）
 
@@ -26,23 +26,19 @@ class AudioHandler:
         """
         try:
             # audio_fileがバイトデータの場合、BytesIOオブジェクトに変換
+            audio_source = audio_file
             if isinstance(audio_file, bytes):
-                audio_bytes_io = io.BytesIO(audio_file)
-                audio_bytes_io.name = "audio.wav"
+                audio_source = io.BytesIO(audio_file)
+                audio_source.name = "audio.wav"
 
-                transcript = self.client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_bytes_io,
-                    language="ja"
-                )
-            else:
-                # すでにファイルオブジェクトの場合
-                transcript = self.client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    language="ja"
-                )
+            create_kwargs = {
+                "model": "whisper-1",
+                "file": audio_source,
+            }
+            if language:
+                create_kwargs["language"] = language
 
+            transcript = self.client.audio.transcriptions.create(**create_kwargs)
             return transcript.text
 
         except Exception as e:
