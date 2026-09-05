@@ -1,0 +1,17 @@
+{
+  "name": "AI Chatbot (Streamlit)",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "streamlit",
+      "command": "./venv/bin/streamlit run app.py --server.headless true --server.enableCORS false --server.enableXsrfProtection false --server.address 0.0.0.0 --server.port 8501",
+      "description": "Runs the Streamlit AI chatbot on port 8501. Requires OPENAI_API_KEY to be set as an environment secret for live chat; the local SQLite DB and 社内規程 RAG search work without it."
+    }
+  ],
+  "ports": [
+    {
+      "name": "streamlit",
+      "port": 8501
+    }
+  ]
+}
