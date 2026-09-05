@@ -12,6 +12,7 @@ OpenAI APIを使用したシンプルで高機能なAIチャットボットア�
 - 🔊 **音声出力**: OpenAI TTS APIによる音声読み上げ
 - 🎯 **プロンプト設定**: システムプロンプト・Temperature・Max Tokensのカスタマイズ
 - 💾 **プリセット機能**: よく使う設定の保存・読み込み
+- 🌐 **表示言語切替**: サイドバーから日本語 / English を切り替え可能
 
 ## 📋 必要環境
 
@@ -65,6 +66,12 @@ PostgreSQLを利用する場合は `DATABASE_URL` も設定：
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require
 ```
 
+表示言語の初期値を固定したい場合は `APP_DISPLAY_LANGUAGE` を設定します（`ja` または `en`）。未設定時は URL の `?lang=`、ブラウザ言語、日本語の順で決まります。
+
+```bash
+APP_DISPLAY_LANGUAGE=ja
+```
+
 ### 5. アプリケーションの起動
 
 ```bash
@@ -99,6 +106,14 @@ streamlit run app.py
 
 - **音声入力**: 「🎤 録音」ボタンをクリックして音声入力
 - **音声出力**: 「🔊 音声出力」ボタンで最新のAI応答を音声再生
+
+### 表示言語
+
+サイドバー上部の「表示言語 / Display language」から切り替えます。
+
+- 日本語 / English に対応
+- 選択内容は URL の `?lang=ja` / `?lang=en` に保存されるため、再読み込み後も維持されます
+- 未カスタマイズのシステムプロンプトと空の下書き会話名も、選択言語に合わせて更新されます
 
 ### プロンプト設定
 
@@ -135,7 +150,8 @@ ai-chatbot-app/
 │   ├── llm_client.py      # LLM API呼び出し
 │   ├── file_handler.py    # ファイル処理
 │   ├── audio_handler.py   # 音声処理
-│   └── prompt_manager.py  # プロンプト管理
+│   ├── prompt_manager.py  # プロンプト管理
+│   └── i18n.py            # 表示言語（日本語 / English）
 └── data/
     ├── chatbot.db         # SQLiteデータベース（自動生成）
     └── presets/           # プリセット保存先

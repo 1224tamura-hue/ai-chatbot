@@ -1,5 +1,5 @@
 import sqlite3
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Sequence, Union
 import os
 import re
 
@@ -31,6 +31,14 @@ ALNUM_TOKEN_PATTERN = re.compile(r"[a-z0-9]{2,}")
 JA_TOKEN_PATTERN = re.compile(r"[一-龥ぁ-んァ-ンー]{2,}")
 JA_SCRIPT_TOKEN_PATTERN = re.compile(r"[一-龥]{2,}|[ぁ-ん]{2,}|[ァ-ンー]{2,}")
 JA_SEGMENT_DELIMITER_PATTERN = re.compile(r"[のはをにでとがへやも、。！？\s]+")
+
+DEFAULT_CONVERSATION_TITLES = ("新しい会話", "New conversation")
+
+
+def _as_title_list(title: Union[str, Sequence[str]]) -> List[str]:
+    if isinstance(title, str):
+        return [title]
+    return [item for item in title if item]
 
 
 class DatabaseManager:
@@ -327,29 +335,38 @@ class DatabaseManager:
         conn.commit()
         conn.close()
 
-    def cleanup_empty_conversations(self, title: str = "新しい会話", keep: int = 1) -> None:
+    def cleanup_empty_conversations(
+        self,
+        title: Union[str, Sequence[str]] = DEFAULT_CONVERSATION_TITLES,
+        keep: int = 1,
+    ) -> None:
         """
         指定タイトルの空会話を整理（最新を残して削除）
 
         Args:
-            title: 会話タイトル
+            title: 会話タイトル（複数言語のデフォルト名を指定可能）
             keep: 残す件数
         """
         if keep < 0:
             return
 
+        titles = _as_title_list(title)
+        if not titles:
+            return
+
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        self._execute(cursor, """
+        placeholders = ", ".join("?" for _ in titles)
+        self._execute(cursor, f"""
             SELECT c.id, c.updated_at
             FROM conversations c
             LEFT JOIN messages m ON m.conversation_id = c.id
-            WHERE c.title = ?
+            WHERE c.title IN ({placeholders})
             GROUP BY c.id
             HAVING COUNT(m.id) = 0
             ORDER BY c.updated_at DESC, c.id DESC
-        """, (title,))
+        """, tuple(titles))
 
         rows = cursor.fetchall()
         ids = [row["id"] for row in rows]
@@ -565,7 +582,7 @@ class DatabaseManager:
     def auto_title_conversation_if_default(
         self,
         conversation_id: int,
-        default_title: str = "新しい会話",
+        default_title: Union[str, Sequence[str]] = DEFAULT_CONVERSATION_TITLES,
         max_len: int = 28
     ) -> None:
         """
@@ -581,7 +598,7 @@ class DatabaseManager:
             return
 
         title = (row["title"] or "").strip()
-        if title != default_title:
+        if title not in _as_title_list(default_title):
             conn.close()
             return
 
